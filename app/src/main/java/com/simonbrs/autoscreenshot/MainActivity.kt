@@ -12,7 +12,6 @@ import android.os.Environment
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.ActivityResultLauncher
@@ -38,17 +37,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.simonbrs.autoscreenshot.service.ScreenshotService
 import com.simonbrs.autoscreenshot.ui.theme.AutoScreenshotTheme
 
 class MainActivity : ComponentActivity() {
     private val STORAGE_PERMISSION_CODE = 100
-    private val MEDIA_PROJECTION_REQUEST_CODE = 101
     
     private lateinit var mediaProjectionManager: MediaProjectionManager
     private lateinit var permissionLauncher: ActivityResultLauncher<Array<String>>
+    private lateinit var mediaProjectionLauncher: ActivityResultLauncher<Intent>
     
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -64,10 +62,35 @@ class MainActivity : ComponentActivity() {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     if (!Environment.isExternalStorageManager()) {
                         requestManageExternalStoragePermission()
+                    } else {
+                        requestMediaProjection()
                     }
+                } else {
+                    requestMediaProjection()
                 }
             } else {
                 Toast.makeText(this, "Permissions are required to take screenshots", Toast.LENGTH_SHORT).show()
+            }
+        }
+        
+        mediaProjectionLauncher = registerForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) { result ->
+            if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+                // Start screenshot service
+                val serviceIntent = Intent(this, ScreenshotService::class.java)
+                serviceIntent.putExtra(ScreenshotService.EXTRA_RESULT_DATA, result.data)
+                
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(serviceIntent)
+                } else {
+                    startService(serviceIntent)
+                }
+                
+                Toast.makeText(this, "Screenshot service started", Toast.LENGTH_SHORT).show()
+                //finish() // Optional: Close the app as service will run in background
+            } else {
+                Toast.makeText(this, "Permission denied, cannot take screenshots", Toast.LENGTH_SHORT).show()
             }
         }
         
@@ -88,10 +111,13 @@ class MainActivity : ComponentActivity() {
     private fun startScreenshotCapture() {
         // Check for required permissions
         if (checkAndRequestPermissions()) {
-            // Request media projection permission
-            val intent = mediaProjectionManager.createScreenCaptureIntent()
-            startActivityForResult(intent, MEDIA_PROJECTION_REQUEST_CODE)
+            requestMediaProjection()
         }
+    }
+    
+    private fun requestMediaProjection() {
+        val intent = mediaProjectionManager.createScreenCaptureIntent()
+        mediaProjectionLauncher.launch(intent)
     }
     
     private fun checkAndRequestPermissions(): Boolean {
@@ -143,28 +169,6 @@ class MainActivity : ComponentActivity() {
             } catch (e: Exception) {
                 val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
                 startActivity(intent)
-            }
-        }
-    }
-    
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == MEDIA_PROJECTION_REQUEST_CODE) {
-            if (resultCode == Activity.RESULT_OK && data != null) {
-                // Start screenshot service
-                val serviceIntent = Intent(this, ScreenshotService::class.java)
-                serviceIntent.putExtra(ScreenshotService.EXTRA_RESULT_DATA, data)
-                
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    startForegroundService(serviceIntent)
-                } else {
-                    startService(serviceIntent)
-                }
-                
-                Toast.makeText(this, "Screenshot service started", Toast.LENGTH_SHORT).show()
-                finish() // Optional: Close the app as service will run in background
-            } else {
-                Toast.makeText(this, "Permission denied, cannot take screenshots", Toast.LENGTH_SHORT).show()
             }
         }
     }

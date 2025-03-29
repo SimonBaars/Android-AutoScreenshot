@@ -71,6 +71,9 @@ class ScreenshotService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent != null && intent.hasExtra(EXTRA_RESULT_DATA)) {
+            // Start foreground service BEFORE setting up media projection
+            startForeground(NOTIFICATION_ID, createNotification())
+            
             val resultData = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
             } else {
@@ -80,10 +83,12 @@ class ScreenshotService : Service() {
             
             if (resultData != null) {
                 setupMediaProjection(resultData)
-                startForeground(NOTIFICATION_ID, createNotification())
                 isServiceRunning = true
                 handler.post(screenshotRunnable)
             }
+        } else {
+            // Start with a temporary notification if we don't have projection data yet
+            startForeground(NOTIFICATION_ID, createNotification())
         }
         return START_STICKY
     }
@@ -126,29 +131,36 @@ class ScreenshotService : Service() {
     }
 
     private fun setupMediaProjection(resultData: Intent) {
-        val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        mediaProjection = projectionManager.getMediaProjection(Activity.RESULT_OK, resultData)
-        
-        // Get screen metrics
-        val metrics = resources.displayMetrics
-        screenDensity = metrics.densityDpi
-        screenWidth = metrics.widthPixels
-        screenHeight = metrics.heightPixels
-        
-        // Setup image reader
-        imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
-        
-        // Create virtual display
-        virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "ScreenCapture",
-            screenWidth,
-            screenHeight,
-            screenDensity,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader?.surface,
-            null,
-            null
-        )
+        try {
+            val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            mediaProjection = projectionManager.getMediaProjection(Activity.RESULT_OK, resultData)
+            
+            // Get screen metrics
+            val metrics = resources.displayMetrics
+            screenDensity = metrics.densityDpi
+            screenWidth = metrics.widthPixels
+            screenHeight = metrics.heightPixels
+            
+            // Setup image reader
+            imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+            
+            // Create virtual display
+            virtualDisplay = mediaProjection?.createVirtualDisplay(
+                "ScreenCapture",
+                screenWidth,
+                screenHeight,
+                screenDensity,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                imageReader?.surface,
+                null,
+                null
+            )
+            
+            Log.d(TAG, "Media projection set up successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting up media projection", e)
+            stopSelf()
+        }
     }
 
     private fun tearDownMediaProjection() {
