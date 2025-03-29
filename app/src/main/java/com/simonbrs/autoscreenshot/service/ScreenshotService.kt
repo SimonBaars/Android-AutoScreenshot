@@ -22,6 +22,7 @@ import android.os.Looper
 import android.util.DisplayMetrics
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import com.simonbrs.autoscreenshot.R
 import java.io.File
 import java.io.FileOutputStream
@@ -72,7 +73,13 @@ class ScreenshotService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent != null && intent.hasExtra(EXTRA_RESULT_DATA)) {
             // Start foreground service BEFORE setting up media projection
-            startForeground(NOTIFICATION_ID, createNotification())
+            val notification = createNotification()
+            
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIFICATION_ID, notification, ServiceCompat.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
             
             val resultData = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
@@ -88,7 +95,13 @@ class ScreenshotService : Service() {
             }
         } else {
             // Start with a temporary notification if we don't have projection data yet
-            startForeground(NOTIFICATION_ID, createNotification())
+            val notification = createNotification()
+            
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIFICATION_ID, notification, ServiceCompat.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
         }
         return START_STICKY
     }
