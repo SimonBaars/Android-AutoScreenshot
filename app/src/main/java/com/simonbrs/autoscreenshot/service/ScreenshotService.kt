@@ -76,7 +76,7 @@ class ScreenshotService : Service() {
             val notification = createNotification()
             
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(NOTIFICATION_ID, notification, ServiceCompat.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+                startForeground(NOTIFICATION_ID, notification, 8)
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
@@ -98,7 +98,7 @@ class ScreenshotService : Service() {
             val notification = createNotification()
             
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(NOTIFICATION_ID, notification, ServiceCompat.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+                startForeground(NOTIFICATION_ID, notification, 8)
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
