@@ -177,7 +177,7 @@ class ScreenshotService : Service() {
                         // Create a copy of the bitmap that will survive after the image is closed
                         val bitmap = imageToBitmap(image)
                         // Create a copy that won't be recycled
-                        val bitmapCopy = bitmap.copy(bitmap.config, false)
+                        val bitmapCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
                         // We can safely close the image and recycle the original bitmap
                         image.close()
                         bitmap.recycle()
