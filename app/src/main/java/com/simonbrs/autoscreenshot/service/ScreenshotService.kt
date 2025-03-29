@@ -75,11 +75,8 @@ class ScreenshotService : Service() {
             // Start foreground service BEFORE setting up media projection
             val notification = createNotification()
             
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(NOTIFICATION_ID, notification, 8)
-            } else {
-                startForeground(NOTIFICATION_ID, notification)
-            }
+            // Simply use startForeground without the type - use manifest declaration instead
+            startForeground(NOTIFICATION_ID, notification)
             
             val resultData = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
@@ -97,11 +94,8 @@ class ScreenshotService : Service() {
             // Start with a temporary notification if we don't have projection data yet
             val notification = createNotification()
             
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(NOTIFICATION_ID, notification, 8)
-            } else {
-                startForeground(NOTIFICATION_ID, notification)
-            }
+            // Simply use startForeground without the type - use manifest declaration instead
+            startForeground(NOTIFICATION_ID, notification)
         }
         return START_STICKY
     }
