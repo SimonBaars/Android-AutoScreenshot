@@ -39,7 +39,7 @@
         
         <service
             android:name=".service.ScreenshotService"
-            android:foregroundServiceType="mediaProjection|camera"
+            android:foregroundServiceType="mediaProjection"
             android:enabled="true"
             android:exported="false" />
     </application>
