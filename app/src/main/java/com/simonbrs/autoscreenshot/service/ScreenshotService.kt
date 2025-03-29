@@ -23,7 +23,6 @@ import android.os.Looper
 import android.util.DisplayMetrics
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import androidx.core.app.ServiceCompat
 import com.simonbrs.autoscreenshot.R
 import java.io.File
 import java.io.FileOutputStream
