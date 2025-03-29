@@ -353,14 +353,7 @@ class ScreenshotService : Service() {
             var image: Image? = null
             
             try {
-                // Try a few times to get an image
-                for (i in 0 until 5) {
-                    image = imageReader?.acquireLatestImage()
-                    if (image != null) {
-                        break
-                    }
-                    Thread.sleep(100)
-                }
+                image = imageReader?.acquireLatestImage()
                 
                 if (image == null) {
                     Log.e(TAG, "Failed to acquire image after multiple attempts")
