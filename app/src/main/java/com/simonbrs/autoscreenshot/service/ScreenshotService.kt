@@ -55,6 +55,8 @@ class ScreenshotService : Service() {
     private var screenHeight = 0
     private var isServiceRunning = false
     private var previousScreenshotPath: String? = null
+    private var screenshotCount = 0
+    private var notificationManager: NotificationManager? = null
     
     private val screenshotRunnable = object : Runnable {
         private var lastScreenshotTime = 0L
@@ -80,6 +82,7 @@ class ScreenshotService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -142,11 +145,15 @@ class ScreenshotService : Service() {
     private fun createNotification(): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Auto Screenshot")
-            .setContentText("Taking screenshots every 10 seconds")
+            .setContentText("Taking screenshots every 10 seconds (Total: $screenshotCount)")
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setSilent(true)
             .build()
+    }
+
+    private fun updateNotification() {
+        notificationManager?.notify(NOTIFICATION_ID, createNotification())
     }
 
     private fun setupMediaProjection(resultData: Intent) {
@@ -307,9 +314,13 @@ class ScreenshotService : Service() {
                                     Log.d(TAG, "Deleted duplicate screenshot: $fullPath")
                                 } else {
                                     previousScreenshotPath = fullPath
+                                    screenshotCount++
+                                    handler.post { updateNotification() }
                                 }
                             } else {
                                 previousScreenshotPath = fullPath
+                                screenshotCount++
+                                handler.post { updateNotification() }
                             }
                         } else {
                             Log.e(TAG, "Failed to compress bitmap to file")
