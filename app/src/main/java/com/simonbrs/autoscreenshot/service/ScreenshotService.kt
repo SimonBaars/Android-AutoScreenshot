@@ -22,18 +22,19 @@ import android.os.IBinder
 import android.os.Looper
 import android.util.DisplayMetrics
 import android.util.Log
+import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import com.simonbrs.autoscreenshot.R
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
-import java.text.SimpleDateFormat
 import java.util.Calendar
-import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 class ScreenshotService : Service() {
     companion object {
@@ -59,27 +60,26 @@ class ScreenshotService : Service() {
     private var screenHeight = 0
     private var isServiceRunning = false
     private var previousScreenshotPath: String? = null
-    private var screenshotCount = 0
+    private var screenshotCount = AtomicInteger(0)
     private var notificationManager: NotificationManager? = null
     private var isCapturingImage = AtomicBoolean(false)
+    private var lastScreenshotTime = 0L
     
-    private val screenshotRunnable = object : Runnable {
-        private var lastScreenshotTime = 0L
-        
-        override fun run() {
-            if (isServiceRunning) {
-                val currentTime = System.currentTimeMillis()
-                // Only take screenshot if the interval has passed and we're not already capturing
-                if (currentTime - lastScreenshotTime >= SCREENSHOT_INTERVAL_MS && !isCapturingImage.get()) {
-                    lastScreenshotTime = currentTime
-                    takeScreenshot()
-                    Log.d(TAG, "Taking screenshot at interval: $currentTime")
-                } else {
-                    Log.d(TAG, "Skipping screenshot, not enough time passed: ${currentTime - lastScreenshotTime}ms or already capturing: ${isCapturingImage.get()}")
-                }
-                
-                // Always schedule the next check, but don't take screenshots too frequently
-                handler.postDelayed(this, 1000) // Check every second
+    // Use a different approach for scheduling screenshots
+    private val screenshotRunnable = Runnable {
+        if (isServiceRunning) {
+            val currentTime = System.currentTimeMillis()
+            // Strict check: Must be at least SCREENSHOT_INTERVAL_MS since last screenshot
+            if (currentTime - lastScreenshotTime >= SCREENSHOT_INTERVAL_MS && !isCapturingImage.get()) {
+                Log.d(TAG, "Taking screenshot at time ${currentTime}, interval: ${currentTime - lastScreenshotTime}ms")
+                lastScreenshotTime = currentTime
+                takeScreenshot()
+                // Schedule next screenshot exactly at interval
+                handler.postDelayed(this, SCREENSHOT_INTERVAL_MS)
+            } else {
+                // Not yet time or already capturing, check again in 1 second
+                Log.d(TAG, "Not time for screenshot yet, waiting. Time passed: ${currentTime - lastScreenshotTime}ms, isCapturing: ${isCapturingImage.get()}")
+                handler.postDelayed(this, 1000)
             }
         }
     }
@@ -117,6 +117,8 @@ class ScreenshotService : Service() {
                     if (resultData != null) {
                         setupMediaProjection(resultData)
                         isServiceRunning = true
+                        lastScreenshotTime = System.currentTimeMillis() - SCREENSHOT_INTERVAL_MS  // Allow immediate first screenshot
+                        // Schedule first screenshot check
                         handler.post(screenshotRunnable)
                     } else {
                         Log.e(TAG, "No media projection data")
@@ -132,6 +134,7 @@ class ScreenshotService : Service() {
                 Log.d(TAG, "Service started without permission data, stopping")
                 isRunning.set(false)
                 stopSelf()
+                return START_NOT_STICKY // Don't restart if we don't have data
             }
         } catch (e: Exception) {
             Log.e(TAG, "Unexpected error in onStartCommand", e)
@@ -144,7 +147,7 @@ class ScreenshotService : Service() {
 
     override fun onDestroy() {
         isServiceRunning = false
-        handler.removeCallbacks(screenshotRunnable)
+        handler.removeCallbacksAndMessages(null) // Remove all callbacks
         tearDownMediaProjection()
         isRunning.set(false)
         super.onDestroy()
@@ -173,7 +176,7 @@ class ScreenshotService : Service() {
     private fun createNotification(): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Auto Screenshot")
-            .setContentText("Taking screenshots every 10 seconds (Total: $screenshotCount)")
+            .setContentText("Taking screenshots every 10 seconds (Total: ${screenshotCount.get()})")
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setSilent(true)
@@ -198,42 +201,63 @@ class ScreenshotService : Service() {
             }, handler)
             
             // Get screen metrics
-            val metrics = resources.displayMetrics
-            screenDensity = metrics.densityDpi
-            screenWidth = metrics.widthPixels
-            screenHeight = metrics.heightPixels
+            val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            val displayMetrics = DisplayMetrics()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val bounds = windowManager.currentWindowMetrics.bounds
+                screenWidth = bounds.width()
+                screenHeight = bounds.height()
+            } else {
+                @Suppress("DEPRECATION")
+                windowManager.defaultDisplay.getMetrics(displayMetrics)
+                screenWidth = displayMetrics.widthPixels
+                screenHeight = displayMetrics.heightPixels
+            }
+            screenDensity = resources.displayMetrics.densityDpi
             
             // Setup image reader
             imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
             imageReader?.setOnImageAvailableListener({ reader ->
-                if (isCapturingImage.get()) {
+                if (isCapturingImage.getAndSet(true)) {
                     // Already processing an image, ignore
+                    Log.d(TAG, "Already capturing an image, skipping this frame")
                     return@setOnImageAvailableListener
                 }
                 
-                isCapturingImage.set(true)
+                var image: Image? = null
+                var bitmap: Bitmap? = null
+                var bitmapCopy: Bitmap? = null
+                
                 try {
-                    val image = reader.acquireLatestImage()
-                    if (image != null) {
+                    image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
+                    
+                    // Create a copy of the bitmap that will survive after the image is closed
+                    bitmap = imageToBitmap(image)
+                    // Create a copy that won't be recycled
+                    bitmapCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+                    
+                    // Process the copy on a background thread
+                    executor.execute { 
                         try {
-                            // Create a copy of the bitmap that will survive after the image is closed
-                            val bitmap = imageToBitmap(image)
-                            // Create a copy that won't be recycled
-                            val bitmapCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
-                            // We can safely close the image and recycle the original bitmap
-                            image.close()
-                            bitmap.recycle()
-                            
-                            // Now process the copy on a background thread
                             saveBitmapToFile(bitmapCopy)
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error processing image", e)
-                            image.close()
+                        } finally {
+                            // Ensure bitmap is recycled in the background thread
+                            bitmapCopy?.recycle()
                         }
                     }
+                    
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error acquiring image", e)
+                    Log.e(TAG, "Error processing image", e)
                 } finally {
+                    // Cleanup resources in the main thread
+                    try {
+                        image?.close()
+                        bitmap?.recycle()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error closing resources", e)
+                    }
+                    
+                    // Important: Release the capturing flag when done
                     isCapturingImage.set(false)
                 }
             }, handler)
@@ -303,128 +327,76 @@ class ScreenshotService : Service() {
     }
 
     private fun saveBitmapToFile(bitmap: Bitmap) {
-        executor.execute {
-            var saved = false
-            try {
-                // Get date components for directory structure
-                val calendar = Calendar.getInstance()
-                val year = calendar.get(Calendar.YEAR).toString()
-                val month = String.format(Locale.US, "%02d", calendar.get(Calendar.MONTH) + 1)
-                val day = String.format(Locale.US, "%02d", calendar.get(Calendar.DAY_OF_MONTH))
-                val hour = String.format(Locale.US, "%02d", calendar.get(Calendar.HOUR_OF_DAY))
-                val minute = String.format(Locale.US, "%02d", calendar.get(Calendar.MINUTE))
-                val second = String.format(Locale.US, "%02d", calendar.get(Calendar.SECOND))
-                
-                // Full path for the screenshot file
-                val dirPath = "/storage/emulated/0/Screenshot/$year/$month/$day"
-                val filename = "${hour}_${minute}_${second}.png"
-                val fullPath = "$dirPath/$filename"
-                
-                Log.d(TAG, "Attempting to save to: $fullPath")
-                
-                // Create directory structure
-                val dirFile = File(dirPath)
-                if (!dirFile.exists()) {
-                    val dirsCreated = dirFile.mkdirs()
-                    Log.d(TAG, "Created directories: $dirsCreated for path: $dirPath")
-                    
-                    // Create .nomedia file
-                    val nomediaFile = File(dirFile, ".nomedia")
-                    if (!nomediaFile.exists()) {
-                        try {
-                            val nomediaCreated = nomediaFile.createNewFile()
-                            Log.d(TAG, "Created .nomedia file: $nomediaCreated")
-                        } catch (e: IOException) {
-                            Log.e(TAG, "Failed to create .nomedia file", e)
-                        }
-                    }
-                }
-                
-                // File to save screenshot
-                val file = File(fullPath)
-                
-                try {
-                    FileOutputStream(file).use { out ->
-                        val success = bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
-                        if (success) {
-                            Log.d(TAG, "Screenshot saved to: $fullPath")
-                            saved = true
-                            
-                            // Check if identical to previous screenshot
-                            if (previousScreenshotPath != null) {
-                                val previousFile = File(previousScreenshotPath!!)
-                                if (areFilesIdentical(previousFile, file)) {
-                                    file.delete()
-                                    Log.d(TAG, "Deleted duplicate screenshot: $fullPath")
-                                } else {
-                                    previousScreenshotPath = fullPath
-                                    screenshotCount++
-                                    handler.post { updateNotification() }
-                                }
-                            } else {
-                                previousScreenshotPath = fullPath
-                                screenshotCount++
-                                handler.post { updateNotification() }
-                            }
-                        } else {
-                            Log.e(TAG, "Failed to compress bitmap to file")
-                        }
-                    }
-                } catch (e: IOException) {
-                    Log.e(TAG, "Failed to save screenshot: ${e.message}", e)
-                    
-                    // Try app-specific directory as fallback only if we haven't saved yet
-                    if (!saved) {
-                        saveFallbackScreenshot(bitmap, "$year/$month/$day", filename)
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error in saveBitmapToFile", e)
-            } finally {
-                // Always recycle the bitmap after we're done with it
-                try {
-                    if (!bitmap.isRecycled) {
-                        bitmap.recycle()
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error recycling bitmap", e)
-                }
-            }
-        }
-    }
-
-    private fun saveFallbackScreenshot(bitmap: Bitmap, dateDir: String, filename: String) {
         try {
-            val baseDir = getExternalFilesDir(null)
-            val dir = File(baseDir, "Screenshot/$dateDir")
-            if (!dir.exists()) {
-                dir.mkdirs()
-            }
+            // Get date components for directory structure
+            val calendar = Calendar.getInstance()
+            val year = calendar.get(Calendar.YEAR).toString()
+            val month = String.format(Locale.US, "%02d", calendar.get(Calendar.MONTH) + 1)
+            val day = String.format(Locale.US, "%02d", calendar.get(Calendar.DAY_OF_MONTH))
+            val hour = String.format(Locale.US, "%02d", calendar.get(Calendar.HOUR_OF_DAY))
+            val minute = String.format(Locale.US, "%02d", calendar.get(Calendar.MINUTE))
+            val second = String.format(Locale.US, "%02d", calendar.get(Calendar.SECOND))
             
-            val nomediaFile = File(dir, ".nomedia")
-            if (!nomediaFile.exists()) {
-                nomediaFile.createNewFile()
-            }
+            // Full path for the screenshot file
+            val dirPath = "/storage/emulated/0/Screenshot/$year/$month/$day"
+            val filename = "${hour}_${minute}_${second}.png"
+            val fullPath = "$dirPath/$filename"
             
-            val file = File(dir, filename)
-            FileOutputStream(file).use { out ->
-                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
-                Log.d(TAG, "Screenshot saved to fallback location: ${file.absolutePath}")
+            Log.d(TAG, "Attempting to save to: $fullPath")
+            
+            // Create directory structure
+            val dirFile = File(dirPath)
+            if (!dirFile.exists()) {
+                val dirsCreated = dirFile.mkdirs()
+                Log.d(TAG, "Created directories: $dirsCreated for path: $dirPath")
                 
-                if (previousScreenshotPath != null) {
-                    val previousFile = File(previousScreenshotPath!!)
-                    if (areFilesIdentical(previousFile, file)) {
-                        file.delete()
-                        Log.d(TAG, "Deleted duplicate screenshot from fallback: ${file.absolutePath}")
-                    } else {
-                        previousScreenshotPath = file.absolutePath
+                // Create .nomedia file
+                val nomediaFile = File(dirFile, ".nomedia")
+                if (!nomediaFile.exists()) {
+                    try {
+                        val nomediaCreated = nomediaFile.createNewFile()
+                        Log.d(TAG, "Created .nomedia file: $nomediaCreated")
+                    } catch (e: IOException) {
+                        Log.e(TAG, "Failed to create .nomedia file", e)
                     }
-                } else {
-                    previousScreenshotPath = file.absolutePath
                 }
+            }
+            
+            // File to save screenshot
+            val file = File(fullPath)
+            var isNewScreenshot = true
+            
+            try {
+                FileOutputStream(file).use { out ->
+                    val success = bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+                    if (success) {
+                        Log.d(TAG, "Screenshot saved to: $fullPath")
+                        
+                        // Check if identical to previous screenshot
+                        if (previousScreenshotPath != null) {
+                            val previousFile = File(previousScreenshotPath!!)
+                            if (previousFile.exists() && areFilesIdentical(previousFile, file)) {
+                                file.delete()
+                                Log.d(TAG, "Deleted duplicate screenshot: $fullPath")
+                                isNewScreenshot = false
+                            }
+                        }
+                        
+                        if (isNewScreenshot) {
+                            previousScreenshotPath = fullPath
+                            screenshotCount.incrementAndGet()
+                            handler.post { updateNotification() }
+                        }
+                    } else {
+                        Log.e(TAG, "Failed to compress bitmap to file")
+                    }
+                }
+            } catch (e: IOException) {
+                Log.e(TAG, "Failed to save screenshot: ${e.message}", e)
+                // Fallback is not needed as we're using MANAGE_EXTERNAL_STORAGE permission
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to save screenshot to fallback location", e)
+            Log.e(TAG, "Error in saveBitmapToFile", e)
         }
     }
 

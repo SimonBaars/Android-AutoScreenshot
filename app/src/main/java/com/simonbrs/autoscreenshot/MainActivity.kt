@@ -44,9 +44,13 @@ import com.simonbrs.autoscreenshot.service.ScreenshotService
 import com.simonbrs.autoscreenshot.ui.theme.AutoScreenshotTheme
 
 class MainActivity : ComponentActivity() {
-    private val STORAGE_PERMISSION_CODE = 100
-    private val PREFS_NAME = "AutoScreenshotPrefs"
-    private val KEY_SERVICE_RUNNING = "service_running"
+    companion object {
+        private const val STORAGE_PERMISSION_CODE = 100
+        private const val OVERLAY_PERMISSION_CODE = 101
+        private const val PREFS_NAME = "AutoScreenshotPrefs"
+        private const val KEY_SERVICE_RUNNING = "service_running"
+        private const val AUTO_START_SERVICE = "AUTO_START_SERVICE"
+    }
     
     private lateinit var mediaProjectionManager: MediaProjectionManager
     private lateinit var permissionLauncher: ActivityResultLauncher<Array<String>>
@@ -54,6 +58,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var prefs: SharedPreferences
     
     private var isServiceRunning = false
+    private var shouldAutoStart = false
     
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -61,6 +66,7 @@ class MainActivity : ComponentActivity() {
         
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         isServiceRunning = prefs.getBoolean(KEY_SERVICE_RUNNING, false)
+        shouldAutoStart = intent?.getBooleanExtra(AUTO_START_SERVICE, false) ?: false
         
         mediaProjectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         
@@ -72,11 +78,17 @@ class MainActivity : ComponentActivity() {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     if (!Environment.isExternalStorageManager()) {
                         requestManageExternalStoragePermission()
+                    } else if (!Settings.canDrawOverlays(this)) {
+                        requestOverlayPermission()
                     } else {
                         requestMediaProjection()
                     }
                 } else {
-                    requestMediaProjection()
+                    if (!Settings.canDrawOverlays(this)) {
+                        requestOverlayPermission()
+                    } else {
+                        requestMediaProjection()
+                    }
                 }
             } else {
                 Toast.makeText(this, "Permissions are required to take screenshots", Toast.LENGTH_SHORT).show()
@@ -121,6 +133,31 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        
+        // Auto-start if coming from boot receiver
+        if (shouldAutoStart) {
+            startScreenshotCapture()
+        }
+    }
+    
+    override fun onResume() {
+        super.onResume()
+        
+        // Check if we need to continue the permission flow after external storage or overlay
+        if (shouldAutoStart) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
+                // Wait for user to grant storage permission
+                return
+            }
+            
+            if (!Settings.canDrawOverlays(this)) {
+                // Wait for user to grant overlay permission
+                return
+            }
+            
+            // All permissions are granted, continue with media projection
+            requestMediaProjection()
+        }
     }
     
     private fun saveServiceRunningState(running: Boolean) {
@@ -148,8 +185,23 @@ class MainActivity : ComponentActivity() {
             return
         }
         
+        // Make sure we have overlay permission
+        if (!Settings.canDrawOverlays(this)) {
+            requestOverlayPermission()
+            return
+        }
+        
         val intent = mediaProjectionManager.createScreenCaptureIntent()
         mediaProjectionLauncher.launch(intent)
+    }
+    
+    private fun requestOverlayPermission() {
+        Toast.makeText(this, "Please grant overlay permission for service stability", Toast.LENGTH_SHORT).show()
+        val intent = Intent(
+            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+            Uri.parse("package:$packageName")
+        )
+        startActivityForResult(intent, OVERLAY_PERMISSION_CODE)
     }
     
     private fun checkAndRequestPermissions(): Boolean {
@@ -188,6 +240,12 @@ class MainActivity : ComponentActivity() {
             }
         }
         
+        // Check overlay permission
+        if (!Settings.canDrawOverlays(this)) {
+            requestOverlayPermission()
+            return false
+        }
+        
         return true
     }
     
@@ -201,6 +259,20 @@ class MainActivity : ComponentActivity() {
             } catch (e: Exception) {
                 val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
                 startActivity(intent)
+            }
+        }
+    }
+    
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        
+        if (requestCode == OVERLAY_PERMISSION_CODE) {
+            if (Settings.canDrawOverlays(this)) {
+                if (shouldAutoStart) {
+                    requestMediaProjection()
+                }
+            } else {
+                Toast.makeText(this, "Overlay permission denied", Toast.LENGTH_SHORT).show()
             }
         }
     }
