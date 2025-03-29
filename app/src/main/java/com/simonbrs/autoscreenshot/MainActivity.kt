@@ -87,8 +87,9 @@ class MainActivity : ComponentActivity() {
                     startService(serviceIntent)
                 }
                 
-                Toast.makeText(this, "Screenshot service started", Toast.LENGTH_SHORT).show()
-                //finish() // Optional: Close the app as service will run in background
+                Toast.makeText(this, "Screenshot service started - will save to /storage/emulated/0/Screenshot/YYYY/MM/DD/", Toast.LENGTH_LONG).show()
+                // Keep app open so user can see logs and manage service
+                // finish() - removed to keep app open
             } else {
                 Toast.makeText(this, "Permission denied, cannot take screenshots", Toast.LENGTH_SHORT).show()
             }
@@ -116,6 +117,12 @@ class MainActivity : ComponentActivity() {
     }
     
     private fun requestMediaProjection() {
+        // Make sure we have storage permission first
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
+            requestManageExternalStoragePermission()
+            return
+        }
+        
         val intent = mediaProjectionManager.createScreenCaptureIntent()
         mediaProjectionLauncher.launch(intent)
     }
