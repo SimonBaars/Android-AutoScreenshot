@@ -282,11 +282,14 @@ class ScreenshotService : Service() {
                     screenWidth,
                     screenHeight,
                     screenDensity,
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_ONE_SHOT,
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,  // Standard flag instead of ONE_SHOT
                     imageReader.surface,
                     null,
                     mainHandler
                 )
+                
+                // Wait briefly to ensure the frame is captured
+                Thread.sleep(100)
                 
                 // Capture a single frame
                 val image = imageReader.acquireLatestImage()
@@ -313,10 +316,16 @@ class ScreenshotService : Service() {
                     Log.e(TAG, "Failed to acquire image from reader")
                 }
             } finally {
-                // Clean up resources
-                virtualDisplay?.release()
-                imageReader.close()
-                isCapturingImage.set(false)
+                try {
+                    // Clean up resources
+                    virtualDisplay?.release()
+                    imageReader.close()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error cleaning up resources", e)
+                } finally {
+                    // Always release the capturing flag
+                    isCapturingImage.set(false)
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error taking screenshot", e)
