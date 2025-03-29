@@ -208,8 +208,12 @@ class ScreenshotService : Service() {
         try {
             // For MediaProjection with ImageReader, we don't need to explicitly acquire the image
             // The OnImageAvailableListener will be called when a new frame is available
-            // We just need to trigger a new frame capture by requesting a repaint
-            virtualDisplay?.surface?.requestRefresh()
+            // Just acquiring (and then releasing) the next image will trigger a new frame
+            val image = imageReader?.acquireLatestImage()
+            if (image != null) {
+                // Release the image right away - our listener will get the next one
+                image.close()
+            }
             Log.d(TAG, "Requested screenshot capture")
         } catch (e: Exception) {
             Log.e(TAG, "Error triggering screenshot", e)
