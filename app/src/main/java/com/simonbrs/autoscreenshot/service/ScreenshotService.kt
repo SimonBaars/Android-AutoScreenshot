@@ -142,6 +142,14 @@ class ScreenshotService : Service() {
             val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             mediaProjection = projectionManager.getMediaProjection(Activity.RESULT_OK, resultData)
             
+            // Register callback - REQUIRED for Android 12+
+            mediaProjection?.registerCallback(object : MediaProjection.Callback() {
+                override fun onStop() {
+                    Log.d(TAG, "MediaProjection stopped")
+                    stopSelf()
+                }
+            }, handler)
+            
             // Get screen metrics
             val metrics = resources.displayMetrics
             screenDensity = metrics.densityDpi
@@ -150,6 +158,17 @@ class ScreenshotService : Service() {
             
             // Setup image reader
             imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+            imageReader?.setOnImageAvailableListener({ reader ->
+                try {
+                    reader.acquireLatestImage()?.use { image ->
+                        val bitmap = imageToBitmap(image)
+                        saveBitmapToFile(bitmap)
+                        bitmap.recycle()
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error processing image", e)
+                }
+            }, handler)
             
             // Create virtual display
             virtualDisplay = mediaProjection?.createVirtualDisplay(
@@ -160,10 +179,10 @@ class ScreenshotService : Service() {
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 imageReader?.surface,
                 null,
-                null
+                handler
             )
             
-            Log.d(TAG, "Media projection set up successfully")
+            Log.d(TAG, "Media projection set up successfully with dimensions: ${screenWidth}x${screenHeight}")
         } catch (e: Exception) {
             Log.e(TAG, "Error setting up media projection", e)
             stopSelf()
@@ -181,16 +200,19 @@ class ScreenshotService : Service() {
     }
 
     private fun takeScreenshot() {
-        if (imageReader == null) return
+        if (imageReader == null || virtualDisplay == null) {
+            Log.e(TAG, "Cannot take screenshot: imageReader or virtualDisplay is null")
+            return
+        }
         
         try {
-            imageReader?.acquireLatestImage()?.use { image ->
-                val bitmap = imageToBitmap(image)
-                saveBitmapToFile(bitmap)
-                bitmap.recycle()
-            }
+            // For MediaProjection with ImageReader, we don't need to explicitly acquire the image
+            // The OnImageAvailableListener will be called when a new frame is available
+            // We just need to trigger a new frame capture by requesting a repaint
+            virtualDisplay?.surface?.requestRefresh()
+            Log.d(TAG, "Requested screenshot capture")
         } catch (e: Exception) {
-            Log.e(TAG, "Error taking screenshot", e)
+            Log.e(TAG, "Error triggering screenshot", e)
         }
     }
 
@@ -215,10 +237,6 @@ class ScreenshotService : Service() {
         executor.execute {
             try {
                 // Get date components for directory structure
-                val dateFormat = SimpleDateFormat("yyyy-MM-dd_HH_mm_ss", Locale.US)
-                val currentDate = Date()
-                val dateTime = dateFormat.format(currentDate)
-                
                 val calendar = Calendar.getInstance()
                 val year = calendar.get(Calendar.YEAR).toString()
                 val month = String.format(Locale.US, "%02d", calendar.get(Calendar.MONTH) + 1)
@@ -227,109 +245,96 @@ class ScreenshotService : Service() {
                 val minute = String.format(Locale.US, "%02d", calendar.get(Calendar.MINUTE))
                 val second = String.format(Locale.US, "%02d", calendar.get(Calendar.SECOND))
                 
-                // Create directory structure in public storage
-                val externalDir = Environment.getExternalStorageDirectory()
-                val baseDir = File(externalDir, "Screenshot")
-                
-                Log.d(TAG, "External storage directory: ${externalDir.absolutePath}")
-                Log.d(TAG, "Base screenshot directory: ${baseDir.absolutePath}")
-                Log.d(TAG, "External storage state: ${Environment.getExternalStorageState()}")
-                Log.d(TAG, "Is external storage emulated: ${Environment.isExternalStorageEmulated()}")
-                Log.d(TAG, "Is external storage removable: ${Environment.isExternalStorageRemovable()}")
-                
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    Log.d(TAG, "Is external storage manager: ${Environment.isExternalStorageManager()}")
-                }
-                
-                val yearDir = File(baseDir, year)
-                val monthDir = File(yearDir, month)
-                var dayDir = File(monthDir, day)
-                
-                Log.d(TAG, "Attempting to create directory path: ${dayDir.absolutePath}")
-                
-                // Try to create all directories
-                if (!baseDir.exists()) {
-                    val baseDirCreated = baseDir.mkdir()
-                    Log.d(TAG, "Base dir created: $baseDirCreated")
-                }
-                
-                if (!yearDir.exists()) {
-                    val yearDirCreated = yearDir.mkdir()
-                    Log.d(TAG, "Year dir created: $yearDirCreated")
-                }
-                
-                if (!monthDir.exists()) {
-                    val monthDirCreated = monthDir.mkdir()
-                    Log.d(TAG, "Month dir created: $monthDirCreated")
-                }
-                
-                if (!dayDir.exists()) {
-                    val dayDirCreated = dayDir.mkdir()
-                    Log.d(TAG, "Day dir created: $dayDirCreated")
-                }
-                
-                // Check if directory creation was successful
-                if (!dayDir.exists()) {
-                    Log.e(TAG, "Failed to create directory: ${dayDir.absolutePath}")
-                    // Fallback to app's external files directory
-                    val fallbackBaseDir = getExternalFilesDir(null)
-                    val fallbackDir = File(fallbackBaseDir, "Screenshot/$year/$month/$day")
-                    Log.d(TAG, "Trying fallback location: ${fallbackDir.absolutePath}")
-                    
-                    if (!fallbackDir.exists() && !fallbackDir.mkdirs()) {
-                        Log.e(TAG, "Also failed to create fallback directory: ${fallbackDir.absolutePath}")
-                        return@execute
-                    } else {
-                        Log.d(TAG, "Using fallback directory instead: ${fallbackDir.absolutePath}")
-                        dayDir = fallbackDir
-                    }
-                } else {
-                    Log.d(TAG, "Directory exists: ${dayDir.absolutePath}")
-                }
-                
-                // Create .nomedia file to hide screenshots from gallery
-                val nomediaFile = File(dayDir, ".nomedia")
-                if (!nomediaFile.exists()) {
-                    try {
-                        val nomediaCreated = nomediaFile.createNewFile()
-                        Log.d(TAG, "Created .nomedia file at ${nomediaFile.absolutePath}, success: $nomediaCreated")
-                    } catch (e: IOException) {
-                        Log.e(TAG, "Failed to create .nomedia file", e)
-                    }
-                }
-                
-                // Save the screenshot
+                // Full path for the screenshot file
+                val dirPath = "/storage/emulated/0/Screenshot/$year/$month/$day"
                 val filename = "${hour}_${minute}_${second}.png"
-                val file = File(dayDir, filename)
-                val filePath = file.absolutePath
-                Log.d(TAG, "Saving screenshot to: $filePath")
+                val fullPath = "$dirPath/$filename"
+                
+                Log.d(TAG, "Attempting to save to: $fullPath")
+                
+                // Create directory structure
+                val dirFile = File(dirPath)
+                if (!dirFile.exists()) {
+                    val dirsCreated = dirFile.mkdirs()
+                    Log.d(TAG, "Created directories: $dirsCreated for path: $dirPath")
+                    
+                    // Create .nomedia file
+                    val nomediaFile = File(dirFile, ".nomedia")
+                    if (!nomediaFile.exists()) {
+                        try {
+                            val nomediaCreated = nomediaFile.createNewFile()
+                            Log.d(TAG, "Created .nomedia file: $nomediaCreated")
+                        } catch (e: IOException) {
+                            Log.e(TAG, "Failed to create .nomedia file", e)
+                        }
+                    }
+                }
+                
+                // File to save screenshot
+                val file = File(fullPath)
                 
                 try {
                     FileOutputStream(file).use { out ->
-                        val compressed = bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
-                        Log.d(TAG, "Bitmap compressed to file: $compressed")
-                    }
-                    
-                    // Check if the new screenshot is identical to the previous one
-                    if (previousScreenshotPath != null) {
-                        val previousFile = File(previousScreenshotPath!!)
-                        if (areFilesIdentical(previousFile, file)) {
-                            file.delete()
-                            Log.d(TAG, "Deleted duplicate screenshot: $filePath")
+                        bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+                        Log.d(TAG, "Screenshot saved to: $fullPath")
+                        
+                        // Check if identical to previous screenshot
+                        if (previousScreenshotPath != null) {
+                            val previousFile = File(previousScreenshotPath!!)
+                            if (areFilesIdentical(previousFile, file)) {
+                                file.delete()
+                                Log.d(TAG, "Deleted duplicate screenshot: $fullPath")
+                            } else {
+                                previousScreenshotPath = fullPath
+                            }
                         } else {
-                            previousScreenshotPath = filePath
-                            Log.d(TAG, "Saved screenshot: $filePath")
+                            previousScreenshotPath = fullPath
                         }
-                    } else {
-                        previousScreenshotPath = filePath
-                        Log.d(TAG, "Saved first screenshot: $filePath")
                     }
                 } catch (e: IOException) {
-                    Log.e(TAG, "Failed to save screenshot", e)
+                    Log.e(TAG, "Failed to save screenshot: ${e.message}", e)
+                    
+                    // Try app-specific directory as fallback
+                    saveFallbackScreenshot(bitmap, "$year/$month/$day", filename)
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Unexpected error saving bitmap", e)
+                Log.e(TAG, "Error in saveBitmapToFile", e)
             }
+        }
+    }
+
+    private fun saveFallbackScreenshot(bitmap: Bitmap, dateDir: String, filename: String) {
+        try {
+            val baseDir = getExternalFilesDir(null)
+            val dir = File(baseDir, "Screenshot/$dateDir")
+            if (!dir.exists()) {
+                dir.mkdirs()
+            }
+            
+            val nomediaFile = File(dir, ".nomedia")
+            if (!nomediaFile.exists()) {
+                nomediaFile.createNewFile()
+            }
+            
+            val file = File(dir, filename)
+            FileOutputStream(file).use { out ->
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+                Log.d(TAG, "Screenshot saved to fallback location: ${file.absolutePath}")
+                
+                if (previousScreenshotPath != null) {
+                    val previousFile = File(previousScreenshotPath!!)
+                    if (areFilesIdentical(previousFile, file)) {
+                        file.delete()
+                        Log.d(TAG, "Deleted duplicate screenshot from fallback: ${file.absolutePath}")
+                    } else {
+                        previousScreenshotPath = file.absolutePath
+                    }
+                } else {
+                    previousScreenshotPath = file.absolutePath
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save screenshot to fallback location", e)
         }
     }
 
