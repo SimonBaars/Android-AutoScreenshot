@@ -3,6 +3,7 @@ package com.simonbrs.autoscreenshot
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
@@ -28,6 +29,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,14 +45,22 @@ import com.simonbrs.autoscreenshot.ui.theme.AutoScreenshotTheme
 
 class MainActivity : ComponentActivity() {
     private val STORAGE_PERMISSION_CODE = 100
+    private val PREFS_NAME = "AutoScreenshotPrefs"
+    private val KEY_SERVICE_RUNNING = "service_running"
     
     private lateinit var mediaProjectionManager: MediaProjectionManager
     private lateinit var permissionLauncher: ActivityResultLauncher<Array<String>>
     private lateinit var mediaProjectionLauncher: ActivityResultLauncher<Intent>
+    private lateinit var prefs: SharedPreferences
+    
+    private var isServiceRunning = false
     
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        
+        prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        isServiceRunning = prefs.getBoolean(KEY_SERVICE_RUNNING, false)
         
         mediaProjectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         
@@ -87,9 +97,11 @@ class MainActivity : ComponentActivity() {
                     startService(serviceIntent)
                 }
                 
-                Toast.makeText(this, "Screenshot service started - will save to /storage/emulated/0/Screenshot/YYYY/MM/DD/", Toast.LENGTH_LONG).show()
-                // Keep app open so user can see logs and manage service
-                // finish() - removed to keep app open
+                // Mark the service as running
+                isServiceRunning = true
+                saveServiceRunningState(true)
+                
+                Toast.makeText(this, "Screenshot service started - saving to /storage/emulated/0/Screenshot/YYYY/MM/DD/", Toast.LENGTH_LONG).show()
             } else {
                 Toast.makeText(this, "Permission denied, cannot take screenshots", Toast.LENGTH_SHORT).show()
             }
@@ -102,11 +114,17 @@ class MainActivity : ComponentActivity() {
                     color = MaterialTheme.colorScheme.background
                 ) {
                     ScreenshotScreen(
-                        onStartService = { startScreenshotCapture() }
+                        isServiceRunning = isServiceRunning,
+                        onStartService = { startScreenshotCapture() },
+                        onStopService = { stopScreenshotService() }
                     )
                 }
             }
         }
+    }
+    
+    private fun saveServiceRunningState(running: Boolean) {
+        prefs.edit().putBoolean(KEY_SERVICE_RUNNING, running).apply()
     }
     
     private fun startScreenshotCapture() {
@@ -114,6 +132,13 @@ class MainActivity : ComponentActivity() {
         if (checkAndRequestPermissions()) {
             requestMediaProjection()
         }
+    }
+    
+    private fun stopScreenshotService() {
+        stopService(Intent(this, ScreenshotService::class.java))
+        isServiceRunning = false
+        saveServiceRunningState(false)
+        Toast.makeText(this, "Screenshot service stopped", Toast.LENGTH_SHORT).show()
     }
     
     private fun requestMediaProjection() {
@@ -182,7 +207,13 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun ScreenshotScreen(onStartService: () -> Unit) {
+fun ScreenshotScreen(
+    isServiceRunning: Boolean,
+    onStartService: () -> Unit,
+    onStopService: () -> Unit
+) {
+    val context = LocalContext.current
+    
     Scaffold { innerPadding ->
         Column(
             modifier = Modifier
@@ -206,22 +237,28 @@ fun ScreenshotScreen(onStartService: () -> Unit) {
             
             Spacer(modifier = Modifier.height(32.dp))
             
-            Button(onClick = onStartService) {
-                Text("Start Screenshot Service")
-            }
-            
-            val context = LocalContext.current
-            var showStopButton by remember { mutableStateOf(false) }
-            
-            if (showStopButton) {
-                Spacer(modifier = Modifier.height(16.dp))
-                
-                Button(onClick = {
-                    context.stopService(Intent(context, ScreenshotService::class.java))
-                    Toast.makeText(context, "Service stopped", Toast.LENGTH_SHORT).show()
-                }) {
+            if (isServiceRunning) {
+                Button(onClick = onStopService) {
                     Text("Stop Screenshot Service")
                 }
+                
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                Text(
+                    text = "Service is running in the background.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            } else {
+                Button(onClick = onStartService) {
+                    Text("Start Screenshot Service")
+                }
+                
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                Text(
+                    text = "Service is not running.",
+                    style = MaterialTheme.typography.bodySmall
+                )
             }
         }
     }
@@ -231,6 +268,10 @@ fun ScreenshotScreen(onStartService: () -> Unit) {
 @Composable
 fun ScreenshotScreenPreview() {
     AutoScreenshotTheme {
-        ScreenshotScreen(onStartService = {})
+        ScreenshotScreen(
+            isServiceRunning = false,
+            onStartService = {},
+            onStopService = {}
+        )
     }
 }

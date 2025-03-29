@@ -33,6 +33,7 @@ import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 class ScreenshotService : Service() {
     companion object {
@@ -42,6 +43,9 @@ class ScreenshotService : Service() {
         private const val SCREENSHOT_INTERVAL_MS = 10000L // 10 seconds
         
         const val EXTRA_RESULT_DATA = "extra_result_data"
+        
+        // Flag to ensure only one instance is running
+        private val isRunning = AtomicBoolean(false)
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -57,6 +61,7 @@ class ScreenshotService : Service() {
     private var previousScreenshotPath: String? = null
     private var screenshotCount = 0
     private var notificationManager: NotificationManager? = null
+    private var isCapturingImage = AtomicBoolean(false)
     
     private val screenshotRunnable = object : Runnable {
         private var lastScreenshotTime = 0L
@@ -64,13 +69,13 @@ class ScreenshotService : Service() {
         override fun run() {
             if (isServiceRunning) {
                 val currentTime = System.currentTimeMillis()
-                // Only take screenshot if the interval has passed
-                if (currentTime - lastScreenshotTime >= SCREENSHOT_INTERVAL_MS) {
-                    takeScreenshot()
+                // Only take screenshot if the interval has passed and we're not already capturing
+                if (currentTime - lastScreenshotTime >= SCREENSHOT_INTERVAL_MS && !isCapturingImage.get()) {
                     lastScreenshotTime = currentTime
+                    takeScreenshot()
                     Log.d(TAG, "Taking screenshot at interval: $currentTime")
                 } else {
-                    Log.d(TAG, "Skipping screenshot, not enough time passed: ${currentTime - lastScreenshotTime}ms")
+                    Log.d(TAG, "Skipping screenshot, not enough time passed: ${currentTime - lastScreenshotTime}ms or already capturing: ${isCapturingImage.get()}")
                 }
                 
                 // Always schedule the next check, but don't take screenshots too frequently
@@ -86,32 +91,54 @@ class ScreenshotService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent != null && intent.hasExtra(EXTRA_RESULT_DATA)) {
-            // Start foreground service BEFORE setting up media projection
-            val notification = createNotification()
-            
-            // Simply use startForeground without the type - use manifest declaration instead
-            startForeground(NOTIFICATION_ID, notification)
-            
-            val resultData = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
-            } else {
-                @Suppress("DEPRECATION")
-                intent.getParcelableExtra(EXTRA_RESULT_DATA)
-            }
-            
-            if (resultData != null) {
-                setupMediaProjection(resultData)
-                isServiceRunning = true
-                handler.post(screenshotRunnable)
-            }
-        } else {
-            // Start with a temporary notification if we don't have projection data yet
-            val notification = createNotification()
-            
-            // Simply use startForeground without the type - use manifest declaration instead
-            startForeground(NOTIFICATION_ID, notification)
+        // Only allow one instance to run
+        if (isRunning.getAndSet(true)) {
+            Log.d(TAG, "Service already running, skipping start")
+            // Another instance is already running - just return
+            return START_STICKY
         }
+        
+        try {
+            if (intent != null && intent.hasExtra(EXTRA_RESULT_DATA)) {
+                // Start foreground service BEFORE setting up media projection
+                val notification = createNotification()
+                
+                try {
+                    // Simply use startForeground without the type - use manifest declaration instead
+                    startForeground(NOTIFICATION_ID, notification)
+                    
+                    val resultData = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableExtra(EXTRA_RESULT_DATA)
+                    }
+                    
+                    if (resultData != null) {
+                        setupMediaProjection(resultData)
+                        isServiceRunning = true
+                        handler.post(screenshotRunnable)
+                    } else {
+                        Log.e(TAG, "No media projection data")
+                        stopSelf()
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error starting foreground service", e)
+                    isRunning.set(false)
+                    stopSelf()
+                }
+            } else {
+                // Don't try to start as foreground if we're restarting or don't have permission data
+                Log.d(TAG, "Service started without permission data, stopping")
+                isRunning.set(false)
+                stopSelf()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Unexpected error in onStartCommand", e)
+            isRunning.set(false)
+            stopSelf()
+        }
+        
         return START_STICKY
     }
 
@@ -119,6 +146,7 @@ class ScreenshotService : Service() {
         isServiceRunning = false
         handler.removeCallbacks(screenshotRunnable)
         tearDownMediaProjection()
+        isRunning.set(false)
         super.onDestroy()
     }
 
@@ -178,22 +206,35 @@ class ScreenshotService : Service() {
             // Setup image reader
             imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
             imageReader?.setOnImageAvailableListener({ reader ->
+                if (isCapturingImage.get()) {
+                    // Already processing an image, ignore
+                    return@setOnImageAvailableListener
+                }
+                
+                isCapturingImage.set(true)
                 try {
                     val image = reader.acquireLatestImage()
                     if (image != null) {
-                        // Create a copy of the bitmap that will survive after the image is closed
-                        val bitmap = imageToBitmap(image)
-                        // Create a copy that won't be recycled
-                        val bitmapCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
-                        // We can safely close the image and recycle the original bitmap
-                        image.close()
-                        bitmap.recycle()
-                        
-                        // Now process the copy on a background thread
-                        saveBitmapToFile(bitmapCopy)
+                        try {
+                            // Create a copy of the bitmap that will survive after the image is closed
+                            val bitmap = imageToBitmap(image)
+                            // Create a copy that won't be recycled
+                            val bitmapCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+                            // We can safely close the image and recycle the original bitmap
+                            image.close()
+                            bitmap.recycle()
+                            
+                            // Now process the copy on a background thread
+                            saveBitmapToFile(bitmapCopy)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error processing image", e)
+                            image.close()
+                        }
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error processing image", e)
+                    Log.e(TAG, "Error acquiring image", e)
+                } finally {
+                    isCapturingImage.set(false)
                 }
             }, handler)
             
@@ -217,13 +258,17 @@ class ScreenshotService : Service() {
     }
 
     private fun tearDownMediaProjection() {
-        virtualDisplay?.release()
-        imageReader?.close()
-        mediaProjection?.stop()
-        
-        virtualDisplay = null
-        imageReader = null
-        mediaProjection = null
+        try {
+            virtualDisplay?.release()
+            imageReader?.close()
+            mediaProjection?.stop()
+            
+            virtualDisplay = null
+            imageReader = null
+            mediaProjection = null
+        } catch (e: Exception) {
+            Log.e(TAG, "Error tearing down media projection", e)
+        }
     }
 
     private fun takeScreenshot() {
@@ -234,7 +279,6 @@ class ScreenshotService : Service() {
         
         try {
             // The ImageReader listener will handle the screenshot when a new frame is available
-            // No need to do anything here - just let the system know we're active
             Log.d(TAG, "Requested screenshot capture at: ${System.currentTimeMillis()}")
         } catch (e: Exception) {
             Log.e(TAG, "Error triggering screenshot", e)
@@ -333,12 +377,18 @@ class ScreenshotService : Service() {
                     if (!saved) {
                         saveFallbackScreenshot(bitmap, "$year/$month/$day", filename)
                     }
-                } finally {
-                    // Always recycle the bitmap after we're done with it
-                    bitmap.recycle()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error in saveBitmapToFile", e)
+            } finally {
+                // Always recycle the bitmap after we're done with it
+                try {
+                    if (!bitmap.isRecycled) {
+                        bitmap.recycle()
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error recycling bitmap", e)
+                }
             }
         }
     }
