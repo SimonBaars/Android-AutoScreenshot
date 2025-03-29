@@ -56,6 +56,8 @@ class ScreenshotService : Service() {
     private lateinit var scheduler: ScheduledExecutorService
     
     private var mediaProjection: MediaProjection? = null
+    private var virtualDisplay: VirtualDisplay? = null
+    private var imageReader: ImageReader? = null
     private var screenDensity = 0
     private var screenWidth = 0
     private var screenHeight = 0
@@ -65,6 +67,9 @@ class ScreenshotService : Service() {
     private var notificationManager: NotificationManager? = null
     private var isCapturingImage = AtomicBoolean(false)
     private var wakeLock: PowerManager.WakeLock? = null
+    
+    // Add listener inline variable
+    private var imageListener: ImageReader.OnImageAvailableListener? = null
     
     override fun onCreate() {
         super.onCreate()
@@ -105,38 +110,38 @@ class ScreenshotService : Service() {
                     if (resultData != null) {
                         // We must start the service before trying to acquire wake lock
                         try {
-                            wakeLock?.acquire(SCREENSHOT_INTERVAL_MS * 3) // Ensure we stay awake for at least 30 seconds
+                            wakeLock?.acquire(10 * 60 * 1000L) // Hold wake lock for 10 minutes
                         } catch (e: Exception) {
                             Log.e(TAG, "Error acquiring wake lock, but continuing service", e)
                             // Don't stop service, just continue without wakelock
                         }
                         
-                        // Initialize the projection
-                        setupMediaProjection(resultData)
-                        
-                        // Initialize scheduler for precisely timed screenshots
-                        scheduler = Executors.newSingleThreadScheduledExecutor()
+                        // Initialize the projection with a persistent virtual display
+                        if (!setupMediaProjection(resultData)) {
+                            Log.e(TAG, "Failed to set up media projection")
+                            stopSelf()
+                            return START_NOT_STICKY
+                        }
                         
                         // Mark service as running
                         isServiceRunning = true
                         
-                        // Schedule first screenshot immediately and then periodic screenshots
+                        // Initialize scheduler for precisely timed screenshots
+                        scheduler = Executors.newSingleThreadScheduledExecutor()
+                        
+                        // Take the first screenshot immediately
                         mainHandler.post {
                             Log.d(TAG, "Taking first screenshot immediately")
                             takeScreenshot()
                             
-                            // After first screenshot, schedule the periodic task
-                            try {
-                                scheduler.scheduleAtFixedRate({
-                                    if (isServiceRunning && !isCapturingImage.get()) {
-                                        takeScreenshot()
-                                    }
-                                }, SCREENSHOT_INTERVAL_MS, SCREENSHOT_INTERVAL_MS, TimeUnit.MILLISECONDS)
-                                
-                                Log.d(TAG, "Screenshot scheduler started with interval: $SCREENSHOT_INTERVAL_MS ms")
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Error scheduling screenshots", e)
-                            }
+                            // Schedule the rest at fixed intervals
+                            scheduler.scheduleAtFixedRate({
+                                if (isServiceRunning) {
+                                    takeScreenshot()
+                                }
+                            }, SCREENSHOT_INTERVAL_MS, SCREENSHOT_INTERVAL_MS, TimeUnit.MILLISECONDS)
+                            
+                            Log.d(TAG, "Screenshot scheduler started with interval: $SCREENSHOT_INTERVAL_MS ms")
                         }
                     } else {
                         Log.e(TAG, "No media projection data")
@@ -148,7 +153,6 @@ class ScreenshotService : Service() {
                     stopSelf()
                 }
             } else {
-                // Don't try to start as foreground if we're restarting or don't have permission data
                 Log.d(TAG, "Service started without permission data, stopping")
                 isRunning.set(false)
                 stopSelf()
@@ -228,12 +232,18 @@ class ScreenshotService : Service() {
         notificationManager?.notify(NOTIFICATION_ID, createNotification())
     }
 
-    private fun setupMediaProjection(resultData: Intent) {
+    private fun setupMediaProjection(resultData: Intent): Boolean {
         try {
+            // Get the projection manager and create the projection
             val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             mediaProjection = projectionManager.getMediaProjection(Activity.RESULT_OK, resultData)
             
-            // Register callback - REQUIRED for Android 12+
+            if (mediaProjection == null) {
+                Log.e(TAG, "Failed to get media projection")
+                return false
+            }
+            
+            // Register callback for when projection stops
             mediaProjection?.registerCallback(object : MediaProjection.Callback() {
                 override fun onStop() {
                     Log.d(TAG, "MediaProjection stopped")
@@ -243,12 +253,12 @@ class ScreenshotService : Service() {
             
             // Get screen metrics
             val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-            val displayMetrics = DisplayMetrics()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 val bounds = windowManager.currentWindowMetrics.bounds
                 screenWidth = bounds.width()
                 screenHeight = bounds.height()
             } else {
+                val displayMetrics = DisplayMetrics()
                 @Suppress("DEPRECATION")
                 windowManager.defaultDisplay.getMetrics(displayMetrics)
                 screenWidth = displayMetrics.widthPixels
@@ -256,32 +266,72 @@ class ScreenshotService : Service() {
             }
             screenDensity = resources.displayMetrics.densityDpi
             
+            // Create the image reader that will capture screenshots
+            imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+            
+            // Important: Keep this as class property so it doesn't get garbage collected
+            imageListener = ImageReader.OnImageAvailableListener { reader ->
+                if (!isCapturingImage.get()) {
+                    // Only process the image if we explicitly requested a screenshot
+                    Log.d(TAG, "Image available but not requested, ignoring")
+                    try {
+                        // Drain the queue if we're not capturing
+                        val image = reader.acquireLatestImage()
+                        image?.close()
+                    } catch (e: Exception) {
+                        // Ignore
+                    }
+                }
+            }
+            
+            // Create a persistent virtual display for the lifetime of the service
+            virtualDisplay = mediaProjection?.createVirtualDisplay(
+                "ScreenCapture",
+                screenWidth,
+                screenHeight,
+                screenDensity,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                imageReader?.surface,
+                null,
+                mainHandler
+            )
+            
+            if (virtualDisplay == null) {
+                Log.e(TAG, "Failed to create virtual display")
+                return false
+            }
+            
             Log.d(TAG, "Media projection set up successfully with dimensions: ${screenWidth}x${screenHeight}")
+            return true
         } catch (e: Exception) {
             Log.e(TAG, "Error setting up media projection", e)
-            stopSelf()
+            return false
         }
     }
 
     private fun tearDownMediaProjection() {
         try {
+            virtualDisplay?.release()
+            imageReader?.close()
             mediaProjection?.stop()
+            
+            virtualDisplay = null
+            imageReader = null
             mediaProjection = null
+            imageListener = null
         } catch (e: Exception) {
             Log.e(TAG, "Error tearing down media projection", e)
         }
     }
 
     private fun takeScreenshot() {
-        // If already capturing, don't attempt another capture
         if (isCapturingImage.getAndSet(true)) {
             Log.d(TAG, "Already capturing an image, skipping this request")
             return
         }
         
-        // Check if media projection is still valid
-        if (mediaProjection == null) {
-            Log.e(TAG, "Cannot take screenshot: mediaProjection is null")
+        if (imageReader == null || virtualDisplay == null) {
+            Log.e(TAG, "Cannot take screenshot: resources are null")
             isCapturingImage.set(false)
             return
         }
@@ -289,72 +339,58 @@ class ScreenshotService : Service() {
         Log.d(TAG, "Taking screenshot at: ${System.currentTimeMillis()}")
         
         try {
-            // Refresh wake lock to prevent service from being killed
+            // Refresh wake lock to keep service alive
             try {
                 if (wakeLock?.isHeld == true) {
                     wakeLock?.release()
                 }
-                wakeLock?.acquire(SCREENSHOT_INTERVAL_MS * 3)
+                wakeLock?.acquire(10 * 60 * 1000L) // 10 minutes
             } catch (e: Exception) {
                 Log.e(TAG, "Error refreshing wake lock", e)
-                // Continue anyway
             }
             
-            // Create a new image reader for this specific capture
-            val imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 1)
-            var virtualDisplay: VirtualDisplay? = null
+            // Get the latest image from the image reader
+            var image: Image? = null
             
             try {
-                // Create virtual display
-                virtualDisplay = mediaProjection?.createVirtualDisplay(
-                    "ScreenCapture-${System.currentTimeMillis()}",
-                    screenWidth,
-                    screenHeight,
-                    screenDensity,
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    imageReader.surface,
-                    null,
-                    mainHandler
-                )
-                
-                // Allow time for the frame to be rendered to the surface
-                Thread.sleep(300)
-                
-                // Acquire image
-                val image = imageReader.acquireLatestImage()
-                if (image != null) {
-                    try {
-                        val bitmap = imageToBitmap(image)
-                        val bitmapCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
-                        image.close()
-                        bitmap.recycle()
-                        
-                        // Process on background thread
-                        executor.execute {
-                            try {
-                                saveBitmapToFile(bitmapCopy)
-                            } finally {
-                                bitmapCopy.recycle()
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error processing screenshot image", e)
-                        image.close()
+                // Try a few times to get an image
+                for (i in 0 until 5) {
+                    image = imageReader?.acquireLatestImage()
+                    if (image != null) {
+                        break
                     }
-                } else {
-                    Log.e(TAG, "Failed to acquire image from reader")
+                    Thread.sleep(100)
                 }
-            } finally {
-                try {
-                    // Always clean up resources
-                    virtualDisplay?.release()
-                    imageReader.close()
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error cleaning up resources", e)
-                } finally {
-                    // Always release the capturing flag
+                
+                if (image == null) {
+                    Log.e(TAG, "Failed to acquire image after multiple attempts")
                     isCapturingImage.set(false)
+                    return
                 }
+                
+                val bitmap = imageToBitmap(image)
+                val bitmapCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+                
+                // Close resources immediately
+                image.close()
+                image = null
+                bitmap.recycle()
+                
+                // Process on background thread
+                executor.execute {
+                    try {
+                        saveBitmapToFile(bitmapCopy)
+                    } finally {
+                        bitmapCopy.recycle()
+                        mainHandler.post {
+                            isCapturingImage.set(false)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error processing screenshot", e)
+                image?.close()
+                isCapturingImage.set(false)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error taking screenshot", e)
