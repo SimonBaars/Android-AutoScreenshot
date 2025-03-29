@@ -57,10 +57,22 @@ class ScreenshotService : Service() {
     private var previousScreenshotPath: String? = null
     
     private val screenshotRunnable = object : Runnable {
+        private var lastScreenshotTime = 0L
+        
         override fun run() {
             if (isServiceRunning) {
-                takeScreenshot()
-                handler.postDelayed(this, SCREENSHOT_INTERVAL_MS)
+                val currentTime = System.currentTimeMillis()
+                // Only take screenshot if the interval has passed
+                if (currentTime - lastScreenshotTime >= SCREENSHOT_INTERVAL_MS) {
+                    takeScreenshot()
+                    lastScreenshotTime = currentTime
+                    Log.d(TAG, "Taking screenshot at interval: $currentTime")
+                } else {
+                    Log.d(TAG, "Skipping screenshot, not enough time passed: ${currentTime - lastScreenshotTime}ms")
+                }
+                
+                // Always schedule the next check, but don't take screenshots too frequently
+                handler.postDelayed(this, 1000) // Check every second
             }
         }
     }
@@ -160,10 +172,18 @@ class ScreenshotService : Service() {
             imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
             imageReader?.setOnImageAvailableListener({ reader ->
                 try {
-                    reader.acquireLatestImage()?.use { image ->
+                    val image = reader.acquireLatestImage()
+                    if (image != null) {
+                        // Create a copy of the bitmap that will survive after the image is closed
                         val bitmap = imageToBitmap(image)
-                        saveBitmapToFile(bitmap)
+                        // Create a copy that won't be recycled
+                        val bitmapCopy = bitmap.copy(bitmap.config, false)
+                        // We can safely close the image and recycle the original bitmap
+                        image.close()
                         bitmap.recycle()
+                        
+                        // Now process the copy on a background thread
+                        saveBitmapToFile(bitmapCopy)
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error processing image", e)
@@ -206,15 +226,9 @@ class ScreenshotService : Service() {
         }
         
         try {
-            // For MediaProjection with ImageReader, we don't need to explicitly acquire the image
-            // The OnImageAvailableListener will be called when a new frame is available
-            // Just acquiring (and then releasing) the next image will trigger a new frame
-            val image = imageReader?.acquireLatestImage()
-            if (image != null) {
-                // Release the image right away - our listener will get the next one
-                image.close()
-            }
-            Log.d(TAG, "Requested screenshot capture")
+            // The ImageReader listener will handle the screenshot when a new frame is available
+            // No need to do anything here - just let the system know we're active
+            Log.d(TAG, "Requested screenshot capture at: ${System.currentTimeMillis()}")
         } catch (e: Exception) {
             Log.e(TAG, "Error triggering screenshot", e)
         }
@@ -239,6 +253,7 @@ class ScreenshotService : Service() {
 
     private fun saveBitmapToFile(bitmap: Bitmap) {
         executor.execute {
+            var saved = false
             try {
                 // Get date components for directory structure
                 val calendar = Calendar.getInstance()
@@ -279,27 +294,37 @@ class ScreenshotService : Service() {
                 
                 try {
                     FileOutputStream(file).use { out ->
-                        bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
-                        Log.d(TAG, "Screenshot saved to: $fullPath")
-                        
-                        // Check if identical to previous screenshot
-                        if (previousScreenshotPath != null) {
-                            val previousFile = File(previousScreenshotPath!!)
-                            if (areFilesIdentical(previousFile, file)) {
-                                file.delete()
-                                Log.d(TAG, "Deleted duplicate screenshot: $fullPath")
+                        val success = bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+                        if (success) {
+                            Log.d(TAG, "Screenshot saved to: $fullPath")
+                            saved = true
+                            
+                            // Check if identical to previous screenshot
+                            if (previousScreenshotPath != null) {
+                                val previousFile = File(previousScreenshotPath!!)
+                                if (areFilesIdentical(previousFile, file)) {
+                                    file.delete()
+                                    Log.d(TAG, "Deleted duplicate screenshot: $fullPath")
+                                } else {
+                                    previousScreenshotPath = fullPath
+                                }
                             } else {
                                 previousScreenshotPath = fullPath
                             }
                         } else {
-                            previousScreenshotPath = fullPath
+                            Log.e(TAG, "Failed to compress bitmap to file")
                         }
                     }
                 } catch (e: IOException) {
                     Log.e(TAG, "Failed to save screenshot: ${e.message}", e)
                     
-                    // Try app-specific directory as fallback
-                    saveFallbackScreenshot(bitmap, "$year/$month/$day", filename)
+                    // Try app-specific directory as fallback only if we haven't saved yet
+                    if (!saved) {
+                        saveFallbackScreenshot(bitmap, "$year/$month/$day", filename)
+                    }
+                } finally {
+                    // Always recycle the bitmap after we're done with it
+                    bitmap.recycle()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error in saveBitmapToFile", e)
