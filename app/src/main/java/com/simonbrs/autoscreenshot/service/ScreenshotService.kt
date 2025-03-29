@@ -103,25 +103,41 @@ class ScreenshotService : Service() {
                     }
                     
                     if (resultData != null) {
-                        wakeLock?.acquire(SCREENSHOT_INTERVAL_MS * 3) // Ensure we stay awake for at least 30 seconds
+                        // We must start the service before trying to acquire wake lock
+                        try {
+                            wakeLock?.acquire(SCREENSHOT_INTERVAL_MS * 3) // Ensure we stay awake for at least 30 seconds
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error acquiring wake lock, but continuing service", e)
+                            // Don't stop service, just continue without wakelock
+                        }
                         
                         // Initialize the projection
                         setupMediaProjection(resultData)
                         
                         // Initialize scheduler for precisely timed screenshots
-                        scheduler = Executors.newScheduledThreadPool(1)
+                        scheduler = Executors.newSingleThreadScheduledExecutor()
                         
                         // Mark service as running
                         isServiceRunning = true
                         
-                        // Schedule periodic screenshots at fixed intervals
-                        scheduler.scheduleAtFixedRate({
-                            if (isServiceRunning && !isCapturingImage.get()) {
-                                takeScreenshot()
+                        // Schedule first screenshot immediately and then periodic screenshots
+                        mainHandler.post {
+                            Log.d(TAG, "Taking first screenshot immediately")
+                            takeScreenshot()
+                            
+                            // After first screenshot, schedule the periodic task
+                            try {
+                                scheduler.scheduleAtFixedRate({
+                                    if (isServiceRunning && !isCapturingImage.get()) {
+                                        takeScreenshot()
+                                    }
+                                }, SCREENSHOT_INTERVAL_MS, SCREENSHOT_INTERVAL_MS, TimeUnit.MILLISECONDS)
+                                
+                                Log.d(TAG, "Screenshot scheduler started with interval: $SCREENSHOT_INTERVAL_MS ms")
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error scheduling screenshots", e)
                             }
-                        }, 0, SCREENSHOT_INTERVAL_MS, TimeUnit.MILLISECONDS)
-                        
-                        Log.d(TAG, "Screenshot scheduler started with interval: $SCREENSHOT_INTERVAL_MS ms")
+                        }
                     } else {
                         Log.e(TAG, "No media projection data")
                         stopSelf()
@@ -257,11 +273,13 @@ class ScreenshotService : Service() {
     }
 
     private fun takeScreenshot() {
+        // If already capturing, don't attempt another capture
         if (isCapturingImage.getAndSet(true)) {
             Log.d(TAG, "Already capturing an image, skipping this request")
             return
         }
         
+        // Check if media projection is still valid
         if (mediaProjection == null) {
             Log.e(TAG, "Cannot take screenshot: mediaProjection is null")
             isCapturingImage.set(false)
@@ -271,27 +289,38 @@ class ScreenshotService : Service() {
         Log.d(TAG, "Taking screenshot at: ${System.currentTimeMillis()}")
         
         try {
-            // Each time we create a new ImageReader for a clean capture
+            // Refresh wake lock to prevent service from being killed
+            try {
+                if (wakeLock?.isHeld == true) {
+                    wakeLock?.release()
+                }
+                wakeLock?.acquire(SCREENSHOT_INTERVAL_MS * 3)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error refreshing wake lock", e)
+                // Continue anyway
+            }
+            
+            // Create a new image reader for this specific capture
             val imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 1)
             var virtualDisplay: VirtualDisplay? = null
             
             try {
-                // Create a new virtual display just for this capture
+                // Create virtual display
                 virtualDisplay = mediaProjection?.createVirtualDisplay(
                     "ScreenCapture-${System.currentTimeMillis()}",
                     screenWidth,
                     screenHeight,
                     screenDensity,
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,  // Standard flag instead of ONE_SHOT
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                     imageReader.surface,
                     null,
                     mainHandler
                 )
                 
-                // Wait briefly to ensure the frame is captured
-                Thread.sleep(100)
+                // Allow time for the frame to be rendered to the surface
+                Thread.sleep(300)
                 
-                // Capture a single frame
+                // Acquire image
                 val image = imageReader.acquireLatestImage()
                 if (image != null) {
                     try {
@@ -317,7 +346,7 @@ class ScreenshotService : Service() {
                 }
             } finally {
                 try {
-                    // Clean up resources
+                    // Always clean up resources
                     virtualDisplay?.release()
                     imageReader.close()
                 } catch (e: Exception) {
@@ -330,13 +359,6 @@ class ScreenshotService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "Error taking screenshot", e)
             isCapturingImage.set(false)
-        }
-        
-        // Acquire wakelock for the next interval
-        try {
-            wakeLock?.acquire(SCREENSHOT_INTERVAL_MS * 3)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error acquiring wake lock", e)
         }
     }
 
