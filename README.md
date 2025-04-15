@@ -2,6 +2,12 @@
 
 An Android app that takes screenshots every 10 seconds, organizing them by date and removing identical screenshots automatically.
 
+## How to install
+
+Download the app here: https://github.com/SimonBaars/Android-AutoScreenshot/releases/download/1.0/app-debug.apk
+
+Accept the permissions and start the service. Select "entire screen" when prompted what to record. Navigate to `Screenshot/*` in your file manager to view the screenshots.
+
 ## Features
 
 - Automatic screenshots every 10 seconds
