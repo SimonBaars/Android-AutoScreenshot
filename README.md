@@ -8,6 +8,12 @@ Download the app here: https://github.com/SimonBaars/Android-AutoScreenshot/rele
 
 Accept the permissions and start the service. Select "entire screen" when prompted what to record. Navigate to `Screenshot/*` in your file manager to view the screenshots.
 
+## Other versions
+- Windows: https://github.com/SimonBaars/windows-auto-screenshot
+- XFCE (Linux): https://github.com/SimonBaars/xfce-auto-screenshot
+- Android (Magisk): https://github.com/SimonBaars/magisk-auto-screenshot
+- Android (APK): https://github.com/SimonBaars/Android-AutoScreenshot
+
 ## Features
 
 - Automatic screenshots every 10 seconds
