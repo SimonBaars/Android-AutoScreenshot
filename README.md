@@ -16,6 +16,15 @@ Accept the permissions and start the service. Select "entire screen" when prompt
 - Android (Magisk): https://github.com/SimonBaars/magisk-auto-screenshot
 - Android (APK): https://github.com/SimonBaars/Android-AutoScreenshot
 
+## Using this on Android 16+
+
+Android 16+ includes a Developer Options toggle called "Disable screen share protections". This disables the automatic stopping behavior.​
+
+To enable:
+- Go to Settings → About Phone → Tap Build Number 7 times
+- Go to Settings → System → Developer Options
+- Enable "Disable screen share protections"​
+
 ## Features
 
 - Automatic screenshots every 10 seconds
